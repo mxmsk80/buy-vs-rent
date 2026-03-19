@@ -58,7 +58,8 @@ def run_monte_carlo(
     down = home_price * down_pct
     loan = home_price - down
     monthly_rate = loan_rate / 12
-    pmt = loan * (monthly_rate * (1 + monthly_rate) ** months) / ((1 + monthly_rate) ** months - 1)
+    pmt = (loan * (monthly_rate * (1 + monthly_rate) ** months) / ((1 + monthly_rate) ** months - 1)
+           if loan > 0 else 0.0)
 
     buy_wealth = np.zeros(n_sims)
     rent_wealth = np.zeros(n_sims)
@@ -132,8 +133,8 @@ def sell_after_analysis(
     loan = home_price - down
     monthly_rate = loan_rate / 12
     n_total = loan_term * 12
-    pmt = loan * (monthly_rate * (1 + monthly_rate) ** n_total) / \
-          ((1 + monthly_rate) ** n_total - 1)
+    pmt = (loan * (monthly_rate * (1 + monthly_rate) ** n_total) / ((1 + monthly_rate) ** n_total - 1)
+           if loan > 0 else 0.0)
     selling_cost_pct = 0.06
 
     results = []
@@ -241,7 +242,8 @@ def calc_affordability(home_price, down_pct, loan_rate, loan_term, prop_tax_rate
     loan = home_price - down
     monthly_rate = loan_rate / 12
     n = loan_term * 12
-    pmt = loan * (monthly_rate * (1 + monthly_rate) ** n) / ((1 + monthly_rate) ** n - 1)
+    pmt = (loan * (monthly_rate * (1 + monthly_rate) ** n) / ((1 + monthly_rate) ** n - 1)
+           if loan > 0 else 0.0)
     total_monthly = pmt + home_price * prop_tax_rate / 12 + home_price * insurance_rate / 12 + hoa_monthly
     dti = total_monthly / (income / 12)
     return down, pmt, total_monthly, dti
@@ -267,7 +269,7 @@ with st.sidebar:
     st.divider()
     st.subheader("Home Purchase")
     home_price    = st.number_input("Home Price ($)", value=500_000, step=10_000, format="%d")
-    down_pct      = st.slider("Down Payment (%)", 3, 30, 20) / 100
+    down_pct      = st.slider("Down Payment (%)", 0, 100, 20) / 100
     loan_rate     = st.slider("Mortgage Rate (%)", 3.0, 10.0, 6.75, step=0.05) / 100
     loan_term     = st.selectbox("Loan Term (years)", [15, 20, 30], index=2)
     prop_tax_rate = st.slider("Property Tax Rate (%)", 0.3, 3.0, 1.1, step=0.05) / 100
@@ -524,7 +526,8 @@ _down_be  = _home_price * _down_pct
 _loan_be  = _home_price - _down_be
 _mr_be    = _loan_rate / 12
 _n_be     = _loan_term * 12
-_pmt_be   = _loan_be * (_mr_be * (1 + _mr_be) ** _n_be) / ((1 + _mr_be) ** _n_be - 1)
+_pmt_be   = (_loan_be * (_mr_be * (1 + _mr_be) ** _n_be) / ((1 + _mr_be) ** _n_be - 1)
+             if _loan_be > 0 else 0.0)
 
 eq_principal, eq_appreciation, eq_years = [], [], []
 bal = _loan_be
@@ -559,8 +562,8 @@ _down         = _home_price * _down_pct
 _loan         = _home_price - _down
 _monthly_rate = _loan_rate / 12
 _months_total = _loan_term * 12
-_pmt          = _loan * (_monthly_rate * (1 + _monthly_rate) ** _months_total) / \
-                ((1 + _monthly_rate) ** _months_total - 1)
+_pmt          = (_loan * (_monthly_rate * (1 + _monthly_rate) ** _months_total) /
+                 ((1 + _monthly_rate) ** _months_total - 1) if _loan > 0 else 0.0)
 
 balance = _loan
 amort = []
