@@ -236,6 +236,142 @@ def input_fingerprint(**kwargs) -> tuple:
     return tuple(kwargs.values())
 
 
+def run_cash_vs_mortgage_mc(
+    home_price, down_pct, loan_rate, loan_term,
+    appr_rate, appr_vol,
+    invest_return, invest_vol,
+    prop_tax_rate, insurance_rate, maintenance_rate,
+    tax_bracket,
+    years,
+    n_sims=1000,
+):
+    """
+    All-cash vs leveraged mortgage — both start with `home_price` in available cash.
+    Cash buyer:     pays full price upfront; lower ongoing costs; no mortgage interest deduction.
+    Mortgage buyer: pays down_pct * home_price; invests the loan-amount remainder in stocks;
+                    pays P&I monthly; deducts mortgage interest + SALT (capped at $10k).
+    """
+    np.random.seed(42)
+    months_total = loan_term * 12
+    down = home_price * down_pct
+    loan = home_price - down
+    monthly_rate = loan_rate / 12
+    pmt = (loan * (monthly_rate * (1 + monthly_rate) ** months_total) /
+           ((1 + monthly_rate) ** months_total - 1) if loan > 0 else 0.0)
+
+    cash_wealth = np.zeros(n_sims)
+    mtg_wealth  = np.zeros(n_sims)
+    cash_paths  = np.zeros((n_sims, years + 1))
+    mtg_paths   = np.zeros((n_sims, years + 1))
+
+    for s in range(n_sims):
+        appr_shocks = np.random.normal(appr_rate, appr_vol, years)
+        inv_shocks  = np.random.normal(invest_return, invest_vol, years)
+
+        # ── ALL-CASH BUYER ──────────────────────────────────────────────────────
+        hv_c     = home_price
+        cash_net = -home_price  # full purchase price paid upfront
+
+        for yr in range(years):
+            hv_c *= (1 + appr_shocks[yr])
+            prop_tax_yr  = hv_c * prop_tax_rate
+            # No mortgage interest; only SALT prop-tax deduction (capped $10k)
+            tax_saving   = min(prop_tax_yr, 10_000) * tax_bracket
+            cash_net -= (prop_tax_yr + hv_c * insurance_rate + hv_c * maintenance_rate - tax_saving)
+            cash_paths[s, yr + 1] = hv_c + cash_net  # no loan balance to subtract
+
+        cash_wealth[s] = hv_c - hv_c * 0.06 + cash_net
+
+        # ── MORTGAGE BUYER ─────────────────────────────────────────────────────
+        hv_m      = home_price
+        balance   = loan
+        portfolio = loan   # invests the portion not used for down payment
+        mtg_net   = -down  # only the down payment leaves their hands upfront
+
+        for yr in range(years):
+            hv_m      *= (1 + appr_shocks[yr])   # same home — same appreciation draws
+            portfolio *= (1 + inv_shocks[yr])
+
+            yr_interest = 0.0
+            for m in range(12):
+                interest  = balance * monthly_rate
+                principal = pmt - interest
+                balance   = max(0, balance - principal)
+                yr_interest += interest
+
+            prop_tax_yr  = hv_m * prop_tax_rate
+            deductible   = yr_interest + min(prop_tax_yr, 10_000)
+            tax_saving   = deductible * tax_bracket
+            mtg_net -= (pmt * 12 + prop_tax_yr + hv_m * insurance_rate +
+                        hv_m * maintenance_rate - tax_saving)
+            mtg_paths[s, yr + 1] = (hv_m - balance) + portfolio + mtg_net
+
+        mtg_wealth[s] = hv_m - balance - hv_m * 0.06 + portfolio + mtg_net
+
+    return cash_wealth, mtg_wealth, cash_paths, mtg_paths
+
+
+def cash_vs_mortgage_deterministic(
+    home_price, down_pct, loan_rate, loan_term,
+    appr_rate, invest_return,
+    prop_tax_rate, insurance_rate, maintenance_rate,
+    tax_bracket, years,
+):
+    """Year-by-year deterministic breakdown at median rates."""
+    down = home_price * down_pct
+    loan = home_price - down
+    monthly_rate = loan_rate / 12
+    months_total = loan_term * 12
+    pmt = (loan * (monthly_rate * (1 + monthly_rate) ** months_total) /
+           ((1 + monthly_rate) ** months_total - 1) if loan > 0 else 0.0)
+
+    rows = []
+    hv        = home_price
+    balance   = loan
+    portfolio = loan
+    cash_cum  = -home_price
+    mtg_cum   = -down
+    total_interest = 0.0
+
+    for yr in range(1, years + 1):
+        hv        *= (1 + appr_rate)
+        portfolio *= (1 + invest_return)
+
+        yr_interest = 0.0
+        for _ in range(12):
+            interest  = balance * monthly_rate
+            principal = pmt - interest
+            balance   = max(0, balance - principal)
+            yr_interest += interest
+        total_interest += yr_interest
+
+        prop_tax_yr = hv * prop_tax_rate
+        ins   = hv * insurance_rate
+        maint = hv * maintenance_rate
+
+        cash_tax = min(prop_tax_yr, 10_000) * tax_bracket
+        cash_cum -= (prop_tax_yr + ins + maint - cash_tax)
+        cash_wealth_pre_sale = hv + cash_cum
+
+        mtg_tax = (yr_interest + min(prop_tax_yr, 10_000)) * tax_bracket
+        mtg_cum -= (pmt * 12 + prop_tax_yr + ins + maint - mtg_tax)
+        mtg_wealth_pre_sale = (hv - balance) + portfolio + mtg_cum
+
+        rows.append({
+            "Year":                 yr,
+            "Home Value ($k)":      round(hv / 1e3, 1),
+            "Cash Wealth ($k)":     round(cash_wealth_pre_sale / 1e3, 1),
+            "Mtg Wealth ($k)":      round(mtg_wealth_pre_sale / 1e3, 1),
+            "Portfolio ($k)":       round(portfolio / 1e3, 1),
+            "Yr Interest ($k)":     round(yr_interest / 1e3, 1),
+            "Mtg Tax Savings ($k)": round(mtg_tax / 1e3, 1),
+            "Cash Tax Savings ($k)":round(cash_tax / 1e3, 1),
+            "Mtg Advantage ($k)":   round((mtg_wealth_pre_sale - cash_wealth_pre_sale) / 1e3, 1),
+        })
+
+    return rows, total_interest
+
+
 def calc_affordability(home_price, down_pct, loan_rate, loan_term, prop_tax_rate,
                        insurance_rate, hoa_monthly, savings, income):
     down = home_price * down_pct
@@ -361,6 +497,19 @@ if run_clicked:
             income, tax_bracket,
             n_sims=n_sims,
         )
+        cash_w, mtg_w, cash_paths_cm, mtg_paths_cm = run_cash_vs_mortgage_mc(
+            home_price, down_pct, loan_rate, loan_term,
+            appr_rate, appr_vol,
+            invest_return, invest_vol,
+            prop_tax_rate, INSURANCE_RATE, MAINTENANCE_RATE,
+            tax_bracket, years, n_sims=n_sims,
+        )
+        cm_det_rows, cm_total_interest = cash_vs_mortgage_deterministic(
+            home_price, down_pct, loan_rate, loan_term,
+            appr_rate, invest_return,
+            prop_tax_rate, INSURANCE_RATE, MAINTENANCE_RATE,
+            tax_bracket, years,
+        )
 
     breakeven = compute_breakeven(buy_paths, rent_paths)
 
@@ -377,6 +526,10 @@ if run_clicked:
         "invest_return": invest_return,
         "monthly_liquidity": monthly_liquidity,
         "total_monthly_housing": total_monthly_housing,
+        # cash vs mortgage
+        "cash_w": cash_w, "mtg_w": mtg_w,
+        "cash_paths_cm": cash_paths_cm, "mtg_paths_cm": mtg_paths_cm,
+        "cm_det_rows": cm_det_rows, "cm_total_interest": cm_total_interest,
     }
     st.session_state["sim_fingerprint"] = current_fp
     st.rerun()
@@ -700,6 +853,171 @@ for domain_x, value, title, color in [
     ))
 fig6.update_layout(height=300)
 st.plotly_chart(fig6, use_container_width=True)
+
+# ── Cash vs Mortgage Analysis ─────────────────────────────────────────────────
+st.divider()
+st.subheader("Cash vs Mortgage Analysis")
+st.caption(
+    f"All-cash purchase vs {_down_pct*100:.0f}% down mortgage — "
+    f"both scenarios start with ${_home_price:,} in available cash. "
+    f"The mortgage buyer invests the remaining ${_home_price*(1-_down_pct):,.0f} in stocks."
+)
+
+_cash_w        = R["cash_w"]
+_mtg_w         = R["mtg_w"]
+_cash_paths_cm = R["cash_paths_cm"]
+_mtg_paths_cm  = R["mtg_paths_cm"]
+_cm_det_rows   = R["cm_det_rows"]
+_cm_tot_int    = R["cm_total_interest"]
+
+cash_med_cm   = float(np.median(_cash_w))
+mtg_med_cm    = float(np.median(_mtg_w))
+mtg_adv_cm    = mtg_med_cm - cash_med_cm
+prob_mtg_wins = float((_mtg_w > _cash_w).mean())
+
+# Deterministic: portfolio end value and after-tax total interest
+_det_last     = _cm_det_rows[-1]
+_portfolio_end = _det_last["Portfolio ($k)"] * 1e3
+_invest_gain   = _portfolio_end - _home_price * (1 - _down_pct)   # gain above principal
+_total_int_at  = _cm_tot_int * (1 - _tax_b)                       # after-tax interest cost
+_net_leverage  = _invest_gain - _total_int_at
+
+cm1, cm2, cm3, cm4 = st.columns(4)
+cm1.metric("All-Cash Median Wealth",   f"${cash_med_cm:,.0f}")
+cm2.metric("Mortgage Median Wealth",   f"${mtg_med_cm:,.0f}")
+cm3.metric(
+    "Mortgage Advantage",
+    f"${abs(mtg_adv_cm):,.0f}",
+    f"{'Mortgage' if mtg_adv_cm >= 0 else 'Cash'} wins median",
+    delta_color="normal" if mtg_adv_cm >= 0 else "inverse",
+)
+cm4.metric("Prob. Mortgage Outperforms", f"{prob_mtg_wins*100:.0f}%")
+
+ck1, ck2, ck3 = st.columns(3)
+ck1.metric("Total Mortgage Interest",    f"${_cm_tot_int:,.0f}",
+           f"${_total_int_at:,.0f} after {int(_tax_b*100)}% deduction")
+ck2.metric("Investment Gain on Float",   f"${_invest_gain:,.0f}",
+           f"Portfolio − original loan principal")
+ck3.metric(
+    "Net Leverage Benefit",
+    f"${_net_leverage:,.0f}",
+    "Invest gain minus after-tax interest",
+    delta_color="normal" if _net_leverage >= 0 else "inverse",
+)
+
+# ── Distribution chart ────────────────────────────────────────────────────────
+fig_cm1 = go.Figure()
+fig_cm1.add_trace(go.Histogram(
+    x=_cash_w / 1e3, name="All-Cash", opacity=0.65,
+    marker_color="#FF7043", nbinsx=60,
+    hovertemplate="Wealth: $%{x:.0f}k<br>Count: %{y}",
+))
+fig_cm1.add_trace(go.Histogram(
+    x=_mtg_w / 1e3, name=f"Mortgage ({int(_down_pct*100)}% down)", opacity=0.65,
+    marker_color="#7C4DFF", nbinsx=60,
+    hovertemplate="Wealth: $%{x:.0f}k<br>Count: %{y}",
+))
+fig_cm1.add_vline(x=cash_med_cm / 1e3, line_dash="dash", line_color="#BF360C",
+                  annotation_text="Cash median")
+fig_cm1.add_vline(x=mtg_med_cm  / 1e3, line_dash="dash", line_color="#4527A0",
+                  annotation_text="Mortgage median")
+fig_cm1.update_layout(
+    barmode="overlay",
+    title=f"Wealth Distribution after {_years} Years — Cash vs Mortgage ({_n_sims:,} simulations)",
+    xaxis_title="Net Wealth ($k)", yaxis_title="Frequency", height=380,
+)
+st.plotly_chart(fig_cm1, use_container_width=True)
+
+# ── Wealth paths chart ────────────────────────────────────────────────────────
+yr_ax = list(range(_years + 1))
+med_cash = np.median(_cash_paths_cm, axis=0)
+med_mtg  = np.median(_mtg_paths_cm,  axis=0)
+p10_cash = np.percentile(_cash_paths_cm, 10, axis=0)
+p90_cash = np.percentile(_cash_paths_cm, 90, axis=0)
+p10_mtg  = np.percentile(_mtg_paths_cm,  10, axis=0)
+p90_mtg  = np.percentile(_mtg_paths_cm,  90, axis=0)
+
+fig_cm2 = go.Figure()
+fig_cm2.add_trace(go.Scatter(
+    x=yr_ax + yr_ax[::-1],
+    y=list(p90_cash / 1e3) + list(p10_cash[::-1] / 1e3),
+    fill="toself", fillcolor="rgba(255,112,67,0.15)",
+    line=dict(color="rgba(0,0,0,0)"), name="Cash P10–P90",
+))
+fig_cm2.add_trace(go.Scatter(
+    x=yr_ax + yr_ax[::-1],
+    y=list(p90_mtg / 1e3) + list(p10_mtg[::-1] / 1e3),
+    fill="toself", fillcolor="rgba(124,77,255,0.15)",
+    line=dict(color="rgba(0,0,0,0)"), name="Mortgage P10–P90",
+))
+fig_cm2.add_trace(go.Scatter(
+    x=yr_ax, y=med_cash / 1e3, name="All-Cash median",
+    line=dict(color="#FF7043", width=3),
+))
+fig_cm2.add_trace(go.Scatter(
+    x=yr_ax, y=med_mtg / 1e3, name="Mortgage median",
+    line=dict(color="#7C4DFF", width=3),
+))
+# Mark crossover on median paths
+_cm_cross = None
+for yr in range(1, _years + 1):
+    if med_mtg[yr] >= med_cash[yr]:
+        _cm_cross = yr
+        break
+if _cm_cross is not None:
+    fig_cm2.add_vline(x=_cm_cross, line_dash="dot", line_color="orange",
+                      annotation_text=f"Mtg ahead yr {_cm_cross}",
+                      annotation_position="top left")
+fig_cm2.update_layout(
+    title="Wealth Accumulation Over Time — Cash vs Mortgage (median ± P10/P90)",
+    xaxis_title="Year", yaxis_title="Net Wealth ($k)", height=400,
+)
+st.plotly_chart(fig_cm2, use_container_width=True)
+
+# ── Year-by-year deterministic breakdown ─────────────────────────────────────
+with st.expander("Year-by-Year Deterministic Breakdown"):
+    det_df = pd.DataFrame(_cm_det_rows)
+    # Stacked bar: cash buyer annual cost sources vs mortgage annual cost sources
+    fig_det = go.Figure()
+    fig_det.add_trace(go.Scatter(
+        x=det_df["Year"], y=det_df["Cash Wealth ($k)"],
+        name="All-Cash Wealth", line=dict(color="#FF7043", width=2),
+    ))
+    fig_det.add_trace(go.Scatter(
+        x=det_df["Year"], y=det_df["Mtg Wealth ($k)"],
+        name="Mortgage Wealth", line=dict(color="#7C4DFF", width=2),
+    ))
+    fig_det.add_trace(go.Scatter(
+        x=det_df["Year"], y=det_df["Portfolio ($k)"],
+        name="Invested Portfolio", line=dict(color="#00BCD4", width=2, dash="dot"),
+    ))
+    fig_det.update_layout(
+        title="Deterministic Wealth Paths & Portfolio (median rates, before selling costs)",
+        xaxis_title="Year", yaxis_title="$k", height=340,
+    )
+    st.plotly_chart(fig_det, use_container_width=True)
+
+    st.dataframe(
+        det_df.style.format({c: "{:.1f}" for c in det_df.columns if c != "Year"}),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+with st.expander("How this is calculated"):
+    st.markdown(f"""
+**Both scenarios assume you have ${_home_price:,} in cash available.**
+
+| | All-Cash | Mortgage ({int(_down_pct*100)}% down) |
+|---|---|---|
+| Upfront outlay | ${_home_price:,} (full price) | ${_home_price*_down_pct:,.0f} (down payment) |
+| Invested in stocks | $0 | ${_home_price*(1-_down_pct):,.0f} (loan amount) |
+| Monthly mortgage | None | P&I payment |
+| Tax deductions | Prop tax (SALT ≤ $10k) | Mortgage interest + prop tax (SALT ≤ $10k) |
+
+**Mortgage wins when:** stock return > after-tax mortgage rate (leverage pays off).
+**Cash wins when:** stock return < after-tax mortgage rate, or in tail-risk scenarios (market crash + high rates).
+Selling costs of 6% are applied to the home value at year {_years}.
+""")
 
 # ── Recommendation ────────────────────────────────────────────────────────────
 st.divider()
